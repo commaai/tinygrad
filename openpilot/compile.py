@@ -34,7 +34,7 @@ def get_random_input_tensors():
     "big_input_imgs": np.random.randn(*(1, 12, 128, 256))*256,
     "desire": np.zeros((1,100, 8)),
     "traffic_convention": np.array([[1., 0.]]),
-    "features_buffer": np.random.randn(*(1, 99, 128))
+    "features_buffer": np.random.randn(*(1, 99, 512*3))
     #"initial_state": np.zeros((1, 768))
   }
 
