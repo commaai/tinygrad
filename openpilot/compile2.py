@@ -30,9 +30,10 @@ def get_schedule(onnx_data) -> Tuple[List[ScheduleItem], List[ScheduleItem]]:
   onnx_model = onnx.load(io.BytesIO(onnx_data))
   run_onnx = get_run_onnx(onnx_model)
   input_shapes = {inp.name:tuple(x.dim_value for x in inp.type.tensor_type.shape.dim) for inp in onnx_model.graph.input}
+  input_types = {inp.name:onnx.helper.tensor_dtype_to_np_dtype(inp.type.tensor_type.elem_type) for inp in onnx_model.graph.input}
 
   # run the model
-  inputs = {k:Tensor.empty(*shp) for k,shp in input_shapes.items()}
+  inputs = {k:Tensor.empty(*shp, dtype=getattr(dtypes, input_types[k].name)) for k,shp in input_shapes.items()}
   ret: Tensor = next(iter(run_onnx(inputs).values())).cast(dtypes.float32).contiguous()
   schedule = ret.lazydata.schedule()
 
