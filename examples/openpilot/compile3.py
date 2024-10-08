@@ -33,6 +33,7 @@ def compile():
 
   input_shapes = {inp.name:tuple(x.dim_value for x in inp.type.tensor_type.shape.dim) for inp in onnx_model.graph.input}
   input_types = {inp.name: np.float32 for inp in onnx_model.graph.input}
+  input_types['input_img'] = np.uint8
   input_types['input_imgs'] = np.uint8
   input_types['big_input_imgs'] = np.uint8
   Tensor.manual_seed(100)
