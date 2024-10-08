@@ -26,7 +26,10 @@ def compile():
   print("loaded model")
 
   input_shapes = {inp.name:tuple(x.dim_value for x in inp.type.tensor_type.shape.dim) for inp in onnx_model.graph.input}
-  input_types = {inp.name: tensor_dtype_to_np_dtype(inp.type.tensor_type.elem_type) for inp in onnx_model.graph.input}
+  input_types = {inp.name: np.float32 for inp in onnx_model.graph.input}
+  input_types['input_img'] = np.uint8
+  input_types['input_imgs'] = np.uint8
+  input_types['big_input_imgs'] = np.uint8
   Tensor.manual_seed(100)
   new_inputs = {k:Tensor.randn(*shp, dtype=_from_np_dtype(input_types[k])).mul(8).realize() for k,shp in sorted(input_shapes.items())}
   print("created tensors")
