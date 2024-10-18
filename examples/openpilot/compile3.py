@@ -14,7 +14,7 @@ from onnx.helper import tensor_dtype_to_np_dtype
 from extra.onnx import get_run_onnx   # TODO: port to main tinygrad
 
 OPENPILOT_MODEL = sys.argv[1] if len(sys.argv) > 1 else "https://github.com/commaai/openpilot/raw/v0.9.7/selfdrive/modeld/models/supercombo.onnx"
-OUTPUT = "/tmp/openpilot.pkl"
+OUTPUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/openpilot.pkl"
 
 def compile():
   # hack to fix GPU on OSX: max doesn't work on half, see test/external/external_gpu_fail_osx.py
