@@ -83,7 +83,11 @@ def test(test_val=None):
   new_inputs = {nm:Tensor.randn(*st.shape, dtype=dtype).mul(8).realize() for nm, (st, _, dtype, _) in
                 sorted(zip(run.captured.expected_names, run.captured.expected_st_vars_dtype_device))}
   for _ in range(20):
+    inputs_numpy = {k:v.numpy() for k,v in new_inputs.items()}
     st = time.perf_counter()
+    for k in new_inputs:
+      if 'img' not in k: # dont need to init img tensors, those are backed by openCL GPU memory
+        new_inputs[k] = Tensor(inputs_numpy[k])
     out = run(**new_inputs)
     mt = time.perf_counter()
     val = out['outputs'].numpy()
