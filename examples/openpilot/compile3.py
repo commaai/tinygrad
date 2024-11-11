@@ -5,8 +5,8 @@ if "IMAGE" not in os.environ: os.environ["IMAGE"] = "2"
 if "NOLOCALS" not in os.environ: os.environ["NOLOCALS"] = "1"
 if "JIT_BATCH_SIZE" not in os.environ: os.environ["JIT_BATCH_SIZE"] = "0"
 
-from tinygrad import fetch, Tensor, TinyJit, Device, Context, GlobalCounters
-from tinygrad.helpers import OSX, DEBUG, getenv
+from tinygrad import fetch, Tensor, TinyJit, Context, GlobalCounters
+from tinygrad.helpers import DEBUG, getenv
 from tinygrad.tensor import _from_np_dtype
 
 import onnx
@@ -14,14 +14,14 @@ from onnx.helper import tensor_dtype_to_np_dtype
 from extra.onnx import get_run_onnx   # TODO: port to main tinygrad
 
 OPENPILOT_MODEL = sys.argv[1] if len(sys.argv) > 1 else "https://github.com/commaai/openpilot/raw/v0.9.7/selfdrive/modeld/models/supercombo.onnx"
-OUTPUT = "/tmp/openpilot.pkl"
+OUTPUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/openpilot.pkl"
 
 def compile():
   # hack to fix GPU on OSX: max doesn't work on half, see test/external/external_gpu_fail_osx.py
-  if OSX:
-    from tinygrad.ops import BinaryOps
-    from tinygrad.renderer.cstyle import ClangRenderer, CStyleLanguage
-    CStyleLanguage.code_for_op[BinaryOps.MAX] = ClangRenderer.code_for_op[BinaryOps.MAX]
+  #if OSX:
+  #  from tinygrad.ops import BinaryOps
+  #  from tinygrad.renderer.cstyle import ClangRenderer, CStyleLanguage
+  #  CStyleLanguage.code_for_op[BinaryOps.MAX] = ClangRenderer.code_for_op[BinaryOps.MAX]
 
   Tensor.no_grad = True
   Tensor.training = False
@@ -32,7 +32,12 @@ def compile():
   print("loaded model")
 
   input_shapes = {inp.name:tuple(x.dim_value for x in inp.type.tensor_type.shape.dim) for inp in onnx_model.graph.input}
-  input_types = {inp.name: tensor_dtype_to_np_dtype(inp.type.tensor_type.elem_type) for inp in onnx_model.graph.input}
+  input_types = {inp.name: np.float32 for inp in onnx_model.graph.input}
+  if 'input_img' in input_shapes:
+    input_types['input_img'] = np.uint8
+  else:
+    input_types['input_imgs'] = np.uint8
+    input_types['big_input_imgs'] = np.uint8
   Tensor.manual_seed(100)
   new_inputs = {k:Tensor.randn(*shp, dtype=_from_np_dtype(input_types[k])).mul(8).realize() for k,shp in sorted(input_shapes.items())}
   print("created tensors")
@@ -65,7 +70,11 @@ def test(test_val=None):
   new_inputs = {nm:Tensor.randn(*st.shape, dtype=dtype).mul(8).realize() for nm, (st, _, dtype, _) in
                 sorted(zip(run.captured.expected_names, run.captured.expected_st_vars_dtype_device))}
   for _ in range(20):
+    inputs_numpy = {k:v.numpy() for k,v in new_inputs.items()}
     st = time.perf_counter()
+    for k in new_inputs:
+      if 'img' not in k: # dont need to init img tensors, those are backed by openCL GPU memory
+        new_inputs[k] = Tensor(inputs_numpy[k])
     out = run(**new_inputs)
     mt = time.perf_counter()
     val = out['outputs'].numpy()
