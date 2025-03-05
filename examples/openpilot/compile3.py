@@ -29,6 +29,7 @@ def compile(onnx_file):
   input_types = {inp.name: tensor_dtype_to_np_dtype(inp.type.tensor_type.elem_type) for inp in onnx_model.graph.input}
   # Float inputs and outputs to tinyjits for openpilot are always float32
   input_types = {k:(np.float32 if v==np.float16 else v) for k,v in input_types.items()}
+  input_types = {k:np.uint8 if 'img' in k else v for k,v in input_types.items()}
   Tensor.manual_seed(100)
   new_inputs = {k:Tensor.randn(*shp, dtype=_from_np_dtype(input_types[k])).mul(8).realize() for k,shp in sorted(input_shapes.items())}
   new_inputs_numpy = {k:v.numpy() for k,v in new_inputs.items()}
@@ -95,10 +96,11 @@ def test_vs_compile(run, new_inputs, test_val=None):
   print("**** test done ****")
 
   # test that changing the numpy changes the model outputs
-  for v in new_inputs_numpy.values(): v *= 2
-  out = run(**inputs)
-  changed_val = out.numpy()
-  np.testing.assert_raises(AssertionError, np.testing.assert_array_equal, val, changed_val)
+  if any([x.device == 'NPY' for x in inputs.values()]):
+    for v in new_inputs_numpy.values(): v *= 2
+    out = run(**inputs)
+    changed_val = out.numpy()
+    np.testing.assert_raises(AssertionError, np.testing.assert_array_equal, val, changed_val)
   return val
 
 def test_vs_onnx(new_inputs, test_val, onnx_file):
