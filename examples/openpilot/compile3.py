@@ -14,6 +14,7 @@ from tinygrad.nn.onnx import OnnxRunner
 
 OPENPILOT_MODEL = sys.argv[1] if len(sys.argv) > 1 else "https://github.com/commaai/openpilot/raw/v0.9.7/selfdrive/modeld/models/supercombo.onnx"
 OUTPUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/openpilot.pkl"
+NPY_IMG = bool(int(os.environ.get('NPY_IMG', '0')))
 
 def compile(onnx_file):
   run_onnx = OnnxRunner(onnx_file)
@@ -29,11 +30,15 @@ def compile(onnx_file):
   print("created tensors")
 
   run_onnx_jit = TinyJit(lambda **kwargs:
-                         next(iter(run_onnx({k:v.to(Device.DEFAULT) for k,v in kwargs.items()}).values())).cast('float32'), prune=True)
+                         next(iter(run_onnx({k:v.to(Device.DEFAULT) for k,v in kwargs.items()}).values())).cast('float16'), prune=True)
   for i in range(3):
     GlobalCounters.reset()
     print(f"run {i}")
-    inputs = {**{k:v.clone() for k,v in new_inputs.items() if 'img' in k},
+    if NPY_IMG:
+      input_imgs = {k:Tensor(v, device="NPY").realize() for k,v in new_inputs_numpy.items() if 'img' in k}
+    else:
+      input_imgs = {k:v.clone() for k,v in new_inputs.items() if 'img' in k}
+    inputs = {**input_imgs,
               **{k:Tensor(v, device="NPY").realize() for k,v in new_inputs_numpy.items() if 'img' not in k}}
     with Context(DEBUG=max(DEBUG.value, 2 if i == 2 else 1)):
       ret = run_onnx_jit(**inputs).numpy()
@@ -75,7 +80,11 @@ def test_vs_compile(run, new_inputs, test_val=None):
   new_inputs_numpy = {k:v.numpy() for k,v in new_inputs.items()}
 
   # create fake "from_blob" tensors for the inputs, and wrapped NPY tensors for the numpy inputs (these have the same underlying memory)
-  inputs = {**{k:v for k,v in new_inputs.items() if 'img' in k},
+  if NPY_IMG:
+    input_imgs = {k:Tensor(v, device="NPY").realize() for k,v in new_inputs_numpy.items() if 'img' in k}
+  else:
+    input_imgs = {k:v.clone() for k,v in new_inputs.items() if 'img' in k}
+  inputs = {**input_imgs,
             **{k:Tensor(v, device="NPY").realize() for k,v in new_inputs_numpy.items() if 'img' not in k}}
 
   # run 20 times
