@@ -125,7 +125,7 @@ def test_vs_onnx(new_inputs, test_val, onnx_file, ort=False):
     onnx_session = ort.InferenceSession(onnx_file)
     for _ in range(1 if test_val is not None else 5):
       st = time.perf_counter()
-      onnx_output = onnx_session.run([onnx_model.graph.output[0].name], {k:v.astype(np.float16) for k,v in new_inputs_numpy.items()})
+      onnx_output = onnx_session.run([onnx_model.graph.output[0].name], new_inputs_numpy)
       timings.append(time.perf_counter() - st)
     new_torch_out = onnx_output[0]
   else:
@@ -161,7 +161,7 @@ if __name__ == "__main__":
   if getenv("BENCHMARK"):
     for be in ["torch", "ort"]:
       try:
-        timings = test_vs_onnx(new_inputs, None, onnx_file, be=="ort")
+        timings = test_vs_onnx(new_inputs, test_val, onnx_file, be=="ort")
         print(f"timing {be}: {min(timings)*1000:.2f} ms")
       except Exception as e:
         print(f"{be} fail with {e}")
