@@ -97,6 +97,7 @@ def test_vs_compile(run, inputs, test_val=None):
 def test_vs_onnx(new_inputs, test_val, onnx_file, tol):
   import onnx
   import onnxruntime as ort
+
   onnx_inputs = {k:v.numpy() for k,v in new_inputs.items()}
   onnx_model = onnx.load(onnx_file)
 
