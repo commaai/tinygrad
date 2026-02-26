@@ -136,10 +136,10 @@ def assert_time(env):
 
 if __name__ == "__main__":
   onnx_file = fetch(OPENPILOT_MODEL)
-  with assert_time('ASSERT_COMPILE_TIME'):
+  with assert_time('ASSERT_MAX_COMPILE_TIME'):
     inputs, outputs = compile(onnx_file)
 
-  with assert_time('ASSERT_LOAD_TIME'):
+  with assert_time('ASSERT_MAX_LOAD_TIME'):
     with open(OUTPUT, "rb") as f: pickle_loaded = pickle.load(f)
 
   test_vs_compile(pickle_loaded, inputs, outputs)
