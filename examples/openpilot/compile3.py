@@ -1,4 +1,4 @@
-import os, sys, pickle, time, re
+import os, sys, pickle, time, re, contextlib
 import numpy as np
 if "JIT_BATCH_SIZE" not in os.environ: os.environ["JIT_BATCH_SIZE"] = "0"
 
@@ -97,7 +97,7 @@ def test_vs_compile(run, inputs, test_val=None):
 def test_vs_onnx(new_inputs, test_val, onnx_file, tol):
   import onnx
   import onnxruntime as ort
-  
+
   onnx_inputs = {k:v.numpy() for k,v in new_inputs.items()}
   onnx_model = onnx.load(onnx_file)
 
@@ -127,11 +127,21 @@ def bench(run, inputs):
     with WallTimeEvent(BenchEvent.STEP):
       run(**inputs).numpy()
 
+@contextlib.contextmanager
+def assert_time(env):
+  st = time.perf_counter()
+  yield
+  elapsed = (time.perf_counter() - st)
+  if (threshold:=getenv(env)):
+    assert elapsed < threshold, f"{env}: took {elapsed:.2f}s > {threshold}s"
+
 if __name__ == "__main__":
   onnx_file = fetch(OPENPILOT_MODEL)
-  inputs, outputs = compile(onnx_file)
+  with assert_time('ASSERT_COMPILE_TIME'):
+    inputs, outputs = compile(onnx_file)
 
-  with open(OUTPUT, "rb") as f: pickle_loaded = pickle.load(f)
+  with assert_time('ASSERT_LOAD_TIME'):
+    with open(OUTPUT, "rb") as f: pickle_loaded = pickle.load(f)
 
   test_vs_compile(pickle_loaded, inputs, outputs)
   if getenv("SELFTEST"):
