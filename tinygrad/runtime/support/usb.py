@@ -63,23 +63,33 @@ class USB3:
 
       for slot in range(self.max_streams): struct.pack_into(">B", self.buf_cmd[slot], 3, slot + 1)
 
+      # Cache memoryviews into transfer structs for fast field access (bypass Field property descriptors).
+      self._tr_mvs: dict[int, memoryview] = {}
+      for trs in self.tr.values():
+        for tr in trs: self._tr_mvs[id(tr)] = to_mv(ctypes.cast(tr, ctypes.c_void_p).value, 64)
+      self._handle_addr = ctypes.cast(self.handle, ctypes.c_void_p).value or 0
+
   def _prep_transfer(self, tr, ep, stream_id, buf, length):
-    tr.contents.dev_handle, tr.contents.endpoint, tr.contents.length, tr.contents.buffer = self.handle, ep, length, buf
-    tr.contents.status, tr.contents.flags, tr.contents.timeout, tr.contents.num_iso_packets = 0xff, 0, 1000, 0
-    tr.contents.type = (libusb.LIBUSB_TRANSFER_TYPE_BULK_STREAM if stream_id is not None else libusb.LIBUSB_TRANSFER_TYPE_BULK)
+    mv = self._tr_mvs[id(tr)]
+    tr_type = libusb.LIBUSB_TRANSFER_TYPE_BULK_STREAM if stream_id is not None else libusb.LIBUSB_TRANSFER_TYPE_BULK
+    # struct_libusb_transfer layout: dev_handle(Q@0) flags(B@8) endpoint(B@9) type(B@10) pad(x@11) timeout(I@12) status(I@16) length(i@20)
+    struct.pack_into('<QBBBxIIi', mv, 0, self._handle_addr, 0, ep, tr_type, 1000, 0xff, length)
+    struct.pack_into('<Qi', mv, 48, ctypes.cast(buf, ctypes.c_void_p).value or 0, 0)  # buffer(Q@48) num_iso_packets(i@56)
     if stream_id is not None: libusb.libusb_transfer_set_stream_id(tr, stream_id)
     return tr
 
   def _submit_and_wait(self, cmds):
     for tr in cmds: libusb.libusb_submit_transfer(tr)
+    cmd_mvs = [self._tr_mvs[id(tr)] for tr in cmds]
 
     running = len(cmds)
     while running:
       libusb.libusb_handle_events(self.ctx)
       running = len(cmds)
-      for tr in cmds:
-        if tr.contents.status == libusb.LIBUSB_TRANSFER_COMPLETED: running -= 1
-        elif tr.contents.status != 0xFF: raise RuntimeError(f"EP 0x{tr.contents.endpoint:02X} error: {tr.contents.status}")
+      for i, mv in enumerate(cmd_mvs):
+        status = struct.unpack_from('<I', mv, 16)[0]
+        if status == libusb.LIBUSB_TRANSFER_COMPLETED: running -= 1
+        elif status != 0xFF: raise RuntimeError(f"EP 0x{mv[9]:02X} error: {status}")
 
   def _bulk_out(self, ep: int, payload: bytes, timeout: int = 1000):
     transferred = ctypes.c_int(0)
