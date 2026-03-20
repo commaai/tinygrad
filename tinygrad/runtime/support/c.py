@@ -1,5 +1,5 @@
 from __future__ import annotations
-import ctypes, functools, os, pathlib, re, struct, sys, sysconfig
+import ctypes, functools, os, pathlib, re, sys, sysconfig
 from tinygrad.helpers import ceildiv, getenv, unwrap, DEBUG, OSX, WIN
 from _ctypes import Array as _CArray, _SimpleCData, _Pointer
 from typing import TYPE_CHECKING, get_type_hints, get_args, get_origin, overload, Annotated, Any, Generic, Iterable, ParamSpec, TypeVar
@@ -104,9 +104,6 @@ def init_records() -> None:
       struct._real_fields_.append((nm,) + f) # type: ignore
   _pending_records.clear()
 
-_scalar_fmt = {ctypes.c_ubyte:'B', ctypes.c_byte:'b', ctypes.c_uint16:'H', ctypes.c_int16:'h', ctypes.c_uint32:'I', ctypes.c_int32:'i',
-               ctypes.c_uint64:'Q', ctypes.c_int64:'q', ctypes.c_float:'f', ctypes.c_double:'d', ctypes.c_bool:'?',
-               ctypes.c_ulong:'L', ctypes.c_long:'l', ctypes.c_void_p:'P'}
 class Field(property):
   def __init__(self, typ, off:int, bit_width=None, bit_off=0):
     if bit_width is not None:
@@ -114,10 +111,6 @@ class Field(property):
       # FIXME: signedness
       super().__init__(lambda self: (b2i(mv(self)[sl]) >> bit_off) & mask,
                        lambda self,v: mv(self).__setitem__(sl, i2b((b2i(mv(self)[sl]) & set_mask) | (v << bit_off), sz)))
-    elif (fmt:=_scalar_fmt.get(typ)) is not None:
-      # fast path: use struct.unpack_from/pack_into for scalar types (C-implemented, no intermediate objects)
-      super().__init__(lambda self: struct.unpack_from(fmt, memoryview(self).cast('B'), off)[0],
-                       lambda self,v: struct.pack_into(fmt, (memoryview(self).cast('B')), off, v))
     else:
       sl = slice(off, off + ctypes.sizeof(typ))
       def set_with_objs(f):
