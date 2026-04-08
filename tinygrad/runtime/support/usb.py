@@ -192,6 +192,7 @@ class CustomASM24Controller:
     self.usb = usb or USB3(0xADD1, 0x0001, 0x81, 0x83, 0x02, 0x04, use_bot=True)
     self._pci_cacheable: list[tuple[int, int]] = []
     self._pci_cache: dict[int, int|None] = {}
+    self._cache: dict[int, int] = {}
 
     # Verify custom firmware is running and PCIe link is up (LTSSM=0x78).
     ltssm = self.read(0xB450, 1)[0]
@@ -281,11 +282,13 @@ class CustomASM24Controller:
       result += bytes(buf[:ret])
     return result[:length]
 
-  def write(self, base_addr:int, data:bytes, **kwargs):
+  def write(self, base_addr:int, data:bytes, ignore_cache:bool=True, **kwargs):
     """Write to chip XDATA via vendor control OUT (bRequest=0xE5). wValue=addr, wIndex=val."""
     for off, val in enumerate(data):
+      if not ignore_cache and self._cache.get(base_addr + off) == val: continue
       ret = libusb.libusb_control_transfer(self.usb.handle, 0x40, 0xE5, base_addr + off, val, None, 0, 1000)
       assert ret >= 0, f"write(0x{base_addr + off:04X}, 0x{val:02X}) failed: {ret}"
+      if not ignore_cache: self._cache[base_addr + off] = val
 
   def scsi_write(self, buf:bytes, lba:int=0):
     """Write to SRAM via 0xF2 vendor command + bulk OUT."""
