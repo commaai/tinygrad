@@ -136,6 +136,7 @@ class UOp(OpMixin, metaclass=UOpMetaClass):
     try: del UOpMetaClass.ucache[(self.op, self.dtype, self.src, self.arg, self.tag)]
     except AttributeError: pass
   def __reduce__(self):
+    if self.op is Ops.UNIQUE: return UOp.unique, ()
     args = [self.op, self.dtype, self.src, self.arg, self.tag, self.metadata]
     if self.op is Ops.BUFFER and self.realized is not None: args.append(self.realized)
     return UOp, tuple(args)
