@@ -448,3 +448,6 @@ def to_bgr(tensor:Tensor, h:int, w:int, luma_w:int, chroma_off:int) -> Tensor:
   luma = tensor.reshape(-1)[_addr_table(h, w, round_up(luma_w, 64))]
   chroma = tensor.reshape(-1)[chroma_off:][_addr_table((h + 1) // 2, w, round_up(luma_w, 64))]
   return nv12_to_bgr_from_planes(luma, chroma, h, w).realize()
+
+def jitted_to_bgr(h:int, w:int, luma_w:int, chroma_off:int) -> TinyJit:
+  return TinyJit(lambda tensor: to_bgr(tensor, h, w, luma_w, chroma_off))
