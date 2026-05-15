@@ -1,15 +1,18 @@
 import argparse, os, hashlib, functools
-from typing import Iterator, Callable
-from tinygrad.helpers import getenv, DEBUG, round_up, Timing, tqdm, fetch, ceildiv
-from extra.hevc.hevc import parse_hevc_file_headers, untile_nv12, to_bgr, nv_gpu
+from typing import Iterator
+import numpy as np
+from tinygrad.helpers import getenv, round_up, Timing, tqdm, fetch, ceildiv
+from extra.hevc.hevc import parse_hevc_file_headers, untile_nv12, to_bgr
 from tinygrad import Tensor, dtypes, Device, Variable, TinyJit
+from tinygrad.uop.ops import UOp, Ops
 
 # rounds up hevc input data to 32 bytes, so more optimal kernels can be generated
 HEVC_ROUNDUP = getenv("DATA_ROUNDUP", 32)
 
 @functools.cache
 def _hevc_jitted_decoder(out_image_size:tuple[int, int], max_hist:int, inplace:bool):
-  def hevc_decode_frame(pos:Variable, hevc_tensor:Tensor, offset:Variable, sz:Variable, opaque:Tensor, i:Variable, *hist:Tensor, outbuf:Tensor|None=None):
+  def hevc_decode_frame(pos:Variable, hevc_tensor:Tensor, offset:Variable, sz:Variable, opaque:Tensor, i:Variable,
+                        *hist:Tensor, outbuf:Tensor|None=None):
     x = hevc_tensor[offset:offset+sz*HEVC_ROUNDUP].decode_hevc_frame(pos, out_image_size, opaque[i], hist).realize()
     if outbuf is not None: outbuf.assign(x).realize()
     return x
@@ -35,6 +38,52 @@ def hevc_decode(hevc_tensor:Tensor, opaque:Tensor, frame_info:list, luma_h:int, 
                      opaque, v_i.bind(i), *history, outbuf=preallocated_outputs[i] if preallocated_outputs else None)
     res = preallocated_outputs[i] if preallocated_outputs else img.clone().realize()
     if is_hist: history.append(res)
+    yield res
+
+def hevc_preload_packets(dat:bytes, frame_info:list, device:str="NV") -> list[Tensor]:
+  dat_np = np.frombuffer(dat, dtype=np.uint8)
+  packets = []
+  for offset, sz, _, _, _ in frame_info:
+    packet_size = ceildiv(sz, HEVC_ROUNDUP) * HEVC_ROUNDUP
+    packet = np.zeros(packet_size, dtype=np.uint8)
+    packet[:sz] = dat_np[offset:offset+sz]
+    packets.append(Tensor(packet, dtype=dtypes.uint8, device=device).contiguous().realize())
+  return packets
+
+def _decode_hevc_frame_into(src:Tensor, pos:Variable, out:Tensor, state:Tensor, hist:list[Tensor], out_image_size:tuple[int, int]) -> Tensor:
+  srcs = (out, src.contiguous(), state.contiguous(), *[x.contiguous() for x in hist])
+  fn = UOp(Ops.CUSTOM_FUNCTION, dtypes.void, src=(pos.src[0], *[UOp.const(dtypes.int, s) for s in out_image_size]), arg="encdec")
+  return Tensor(out.uop.after(fn.call(*[s.uop for s in srcs], pos)))
+
+def hevc_decode_preloaded(packets:list[Tensor], opaque:Tensor, frame_info:list, luma_h:int, luma_w:int,
+                          history:list[Tensor]|None=None, outputs:list[Tensor]|None=None,
+                          device:str="NV") -> Iterator[Tensor]:
+  out_image_size = luma_h + (luma_h + 1) // 2, round_up(luma_w, 64)
+  max_hist = max((hs for _, _, _, hs, _ in frame_info), default=0)
+  opaque = opaque.contiguous().realize()
+  history = history or [Tensor.empty(*out_image_size, dtype=dtypes.uint8, device=device).contiguous().realize() for _ in range(max_hist)]
+  outputs = outputs or [Tensor.empty(*out_image_size, dtype=dtypes.uint8, device=device).contiguous().realize() for _ in range(max_hist + 1)]
+
+  assert len(history) == max_hist, f"history length {len(history)} does not match max_hist {max_hist}"
+  assert len(packets) >= len(frame_info), f"packet count {len(packets)} is less than frame count {len(frame_info)}"
+  assert len(outputs) >= len(frame_info) or len(outputs) >= max_hist + 1, f"not enough output buffers: {len(outputs)}"
+
+  opaque_buf = opaque.uop.buffer.ensure_allocated()._buf
+  packet_bufs = [packet.contiguous().realize().uop.buffer.ensure_allocated()._buf for packet in packets]
+  output_bufs = [output.contiguous().realize().uop.buffer.ensure_allocated()._buf for output in outputs]
+  history_bufs = [hist.contiguous().realize().uop.buffer.ensure_allocated()._buf for hist in history]
+  desc_stride = opaque.shape[1]
+  alloc = Device[device].allocator
+
+  for i, (_, _, frame_pos, _, is_hist) in enumerate(frame_info):
+    history = history[-max_hist:] if max_hist > 0 else []
+    history_bufs = history_bufs[-max_hist:] if max_hist > 0 else []
+    output_idx = i if len(outputs) >= len(frame_info) else frame_pos
+    alloc._encode_decode(output_bufs[output_idx], packet_bufs[i], opaque_buf.offset(i*desc_stride), history_bufs, out_image_size, frame_pos)
+    res = outputs[output_idx]
+    if is_hist:
+      history.append(res)
+      history_bufs.append(output_bufs[output_idx])
     yield res
 
 if __name__ == "__main__":
