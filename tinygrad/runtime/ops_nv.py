@@ -437,7 +437,8 @@ class NVKIface:
     self.gpfifo_class:int = next(c for c in [nv_gpu.BLACKWELL_CHANNEL_GPFIFO_A, nv_gpu.AMPERE_CHANNEL_GPFIFO_A] if c in self.nvclasses)
     self.compute_class:int = next(c for c in [nv_gpu.BLACKWELL_COMPUTE_B, nv_gpu.ADA_COMPUTE_A, nv_gpu.AMPERE_COMPUTE_B] if c in self.nvclasses)
     self.dma_class:int = next(c for c in [nv_gpu.BLACKWELL_DMA_COPY_B, nv_gpu.AMPERE_DMA_COPY_B] if c in self.nvclasses)
-    self.viddec_class:int|None = next((c for c in [nv_gpu.NVCFB0_VIDEO_DECODER, nv_gpu.NVC9B0_VIDEO_DECODER] if c in self.nvclasses), None)
+    self.viddec_class:int|None = next((c for c in [nv_gpu.NVCFB0_VIDEO_DECODER, nv_gpu.NVCDB0_VIDEO_DECODER, nv_gpu.NVC9B0_VIDEO_DECODER,
+      nv_gpu.NVC7B0_VIDEO_DECODER, nv_gpu.NVC6B0_VIDEO_DECODER, nv_gpu.NVC4B0_VIDEO_DECODER, nv_gpu.NVB8B0_VIDEO_DECODER] if c in self.nvclasses), None)
 
     usermode = self.rm_alloc(self.dev.subdevice, self.usermode_class)
     return usermode, MMIOInterface(self._gpu_map_to_cpu(usermode, mmio_sz:=0x10000), mmio_sz, fmt='I')

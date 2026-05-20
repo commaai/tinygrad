@@ -266,7 +266,7 @@ def fill_pps_into_dev_context(device_ctx, pps:PPS):
 
 def parse_hevc_file_headers(dat:bytes, device="NV"):
   res = []
-  nal_unit_start = 1
+  nal_unit_start = dat.index(b"\x00\x00\x01")
   history:list[tuple[int, int, int]] = []
   device_ctx = nv_gpu.nvdec_hevc_pic_s(gptimer_timeout_value=92720000, tileformat=1, sw_start_code_e=1, pattern_id=2)
   nal_infos = []

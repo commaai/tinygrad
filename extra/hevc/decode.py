@@ -8,7 +8,7 @@ from tinygrad import Tensor, dtypes, Device, Variable, TinyJit
 HEVC_ROUNDUP = getenv("DATA_ROUNDUP", 32)
 
 @functools.cache
-def _hevc_jitted_decoder(out_image_size:tuple[int, int], max_hist:int, inplace:bool):
+def _hevc_jitted_decoder(out_image_size:tuple[int, int], max_hist:int, inplace:bool, opaque_len:int):
   def hevc_decode_frame(pos:Variable, hevc_tensor:Tensor, offset:Variable, sz:Variable, opaque:Tensor, i:Variable, *hist:Tensor, outbuf:Tensor|None=None):
     x = hevc_tensor[offset:offset+sz*HEVC_ROUNDUP].decode_hevc_frame(pos, out_image_size, opaque[i], hist).realize()
     if outbuf is not None: outbuf.assign(x).realize()
@@ -25,7 +25,7 @@ def hevc_decode(hevc_tensor:Tensor, opaque:Tensor, frame_info:list, luma_h:int, 
   v_sz = Variable("sz", 1, ceildiv(hevc_tensor.numel(), HEVC_ROUNDUP))
   v_i = Variable("i", 0, len(frame_info)-1)
 
-  decode_jit = _hevc_jitted_decoder(out_image_size, max_hist, preallocated_outputs is not None)
+  decode_jit = _hevc_jitted_decoder(out_image_size, max_hist, preallocated_outputs is not None, opaque.shape[0])
   history = history or [Tensor.empty(*out_image_size, dtype=dtypes.uint8, device="NV").contiguous().realize() for _ in range(max_hist)]
   assert len(history) == max_hist, f"history length {len(history)} does not match max_hist {max_hist}"
 
@@ -36,6 +36,27 @@ def hevc_decode(hevc_tensor:Tensor, opaque:Tensor, frame_info:list, luma_h:int, 
     res = preallocated_outputs[i] if preallocated_outputs else img.clone().realize()
     if is_hist: history.append(res)
     yield res
+
+class HevcPacketDecoder:
+  def __init__(self, header:bytes=b"", packets=(), device="NV"):
+    self.device, self.packet_pos, self.frame_pos = device, len(header), 0
+    self.dat = header + b"".join(packets)
+    self.opaque, self.frame_info, self.w, self.h, self.luma_w, self.luma_h, self.chroma_off = parse_hevc_file_headers(self.dat, device=device)
+    self.max_hist = max((h for *_, h, _ in self.frame_info), default=0)
+    self.tensor = Tensor(self.dat, device=device)
+
+  def Decode(self, packet) -> list[Tensor]:
+    self.packet_pos += len(packet)
+    start = self.frame_pos
+    while self.frame_pos < len(self.frame_info) and self.frame_info[self.frame_pos][0] < self.packet_pos: self.frame_pos += 1
+    if not hasattr(self, "frames"):
+      frame_info = [(a, b, c, self.max_hist, d) for a, b, c, _, d in self.frame_info]
+      self.frames = list(hevc_decode(self.tensor, self.opaque.contiguous().realize(), frame_info, self.luma_h, self.luma_w))
+    return self.frames[start:self.frame_pos]
+
+  def to_rgb(self, frame:Tensor) -> Tensor:
+    return to_bgr(frame, self.h, self.w, self.luma_w, self.chroma_off).flip(2).realize()
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
