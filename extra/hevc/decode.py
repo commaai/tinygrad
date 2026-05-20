@@ -1,7 +1,7 @@
 import argparse, os, hashlib, functools
 from typing import Iterator, Callable
 from tinygrad.helpers import getenv, DEBUG, round_up, Timing, tqdm, fetch, ceildiv
-from extra.hevc.hevc import parse_hevc_file_headers, untile_nv12, to_bgr, nv_gpu
+from extra.hevc.hevc import HevcParser, parse_hevc_file_headers, untile_nv12, to_bgr, nv_gpu
 from tinygrad import Tensor, dtypes, Device, Variable, TinyJit
 
 # rounds up hevc input data to 32 bytes, so more optimal kernels can be generated
@@ -38,24 +38,47 @@ def hevc_decode(hevc_tensor:Tensor, opaque:Tensor, frame_info:list, luma_h:int, 
     yield res
 
 class HevcPacketDecoder:
-  def __init__(self, header:bytes=b"", packets=(), device="NV"):
-    self.device, self.packet_pos, self.frame_pos = device, len(header), 0
-    self.dat = header + b"".join(packets)
-    self.opaque, self.frame_info, self.w, self.h, self.luma_w, self.luma_h, self.chroma_off = parse_hevc_file_headers(self.dat, device=device)
-    self.max_hist = max((h for *_, h, _ in self.frame_info), default=0)
-    self.tensor = Tensor(self.dat, device=device)
+  def __init__(self, header:bytes=b"", device="NV"):
+    self.device, self.parser, self.history = device, HevcParser(header, device=device), []
+    self.w, self.h, self.luma_w, self.luma_h, self.chroma_off = self.parser.dimensions()
+    self.out_image_size = self.luma_h + (self.luma_h + 1) // 2, round_up(self.luma_w, 64)
+    self.buf_slot, self.packet_bufs, self.opaque_bufs = 0, [], []
+    self.out_bufs = [Tensor.empty(*self.out_image_size, dtype=dtypes.uint8, device=device).contiguous().realize() for _ in range(16)]
+    self.out_rawbufs = [x._buffer() for x in self.out_bufs]
+
+  def _copy_to_slot(self, bufs, slot:int, dat:bytes):
+    while len(bufs) <= slot: bufs.append(None)
+    if bufs[slot] is None or bufs[slot].numel() < len(dat):
+      bufs[slot] = Tensor.empty(round_up(len(dat), 0x100), dtype=dtypes.uint8, device=self.device).contiguous().realize()
+    rawbuf = bufs[slot]._buffer()
+    rawbuf.allocator._copyin(rawbuf._buf, memoryview(dat))
+    return bufs[slot], rawbuf
 
   def Decode(self, packet) -> list[Tensor]:
-    self.packet_pos += len(packet)
-    start = self.frame_pos
-    while self.frame_pos < len(self.frame_info) and self.frame_info[self.frame_pos][0] < self.packet_pos: self.frame_pos += 1
-    if not hasattr(self, "frames"):
-      frame_info = [(a, b, c, self.max_hist, d) for a, b, c, _, d in self.frame_info]
-      self.frames = list(hevc_decode(self.tensor, self.opaque.contiguous().realize(), frame_info, self.luma_h, self.luma_w))
-    return self.frames[start:self.frame_pos]
+    if not packet: return []
+    ctx, frame_info = self.parser.parse(packet, tensor=False)
+    if not frame_info: return []
+    slot = self.buf_slot % 16
+    self.buf_slot += 1
+    hevc_tensor, hevc_rawbuf = self._copy_to_slot(self.packet_bufs, slot, packet)
+    opaque_buf, opaque_rawbuf = self._copy_to_slot(self.opaque_bufs, slot, ctx)
+    opaque = opaque_buf.reshape(opaque_buf.numel()//self.parser.align_ctx_bytes_size, self.parser.align_ctx_bytes_size)
+    ret = []
+    for i, (offset, sz, frame_pos, hist_size, is_hist) in enumerate(frame_info):
+      self.history = self.history[-hist_size:] if hist_size else []
+      frame = self.out_bufs[frame_pos]
+      bitstream = hevc_rawbuf if offset == 0 else hevc_tensor[offset:offset+ceildiv(sz, HEVC_ROUNDUP)*HEVC_ROUNDUP]._buffer()
+      desc = opaque_rawbuf if i == 0 else opaque[i]._buffer()
+      self.out_rawbufs[frame_pos].allocator._encode_decode(self.out_rawbufs[frame_pos]._buf, bitstream._buf, desc._buf,
+        [h._buffer()._buf for h in self.history], self.out_image_size, frame_pos)
+      ret.append(frame)
+      if is_hist: self.history.append(frame)
+      if len(self.history) >= self.parser.sps.sps_max_dec_pic_buffering[0]: self.history.pop(0)
+    return ret
 
   def to_rgb(self, frame:Tensor) -> Tensor:
     return to_bgr(frame, self.h, self.w, self.luma_w, self.chroma_off).flip(2).realize()
+
 
 
 if __name__ == "__main__":

@@ -86,12 +86,14 @@ class TestHevc(unittest.TestCase):
 
     header = dat[:frame_info[0][0]]
     packets = [dat[offset:offset+sz] for offset, sz, *_ in frame_info]
-    decoder = HevcPacketDecoder(header, packets)
-    for expected, packet in zip(frames, packets):
-      decoded = decoder.Decode(packet)
-      self.assertEqual(len(decoded), 1)
-      Device.default.synchronize()
-      self.assertEqual(bytes(decoded[0].data()), bytes(expected.data()))
+    for _ in range(2):
+      decoder = HevcPacketDecoder(header)
+      for expected, packet in zip(frames, packets):
+        decoded = decoder.Decode(packet)
+        self.assertEqual(len(decoded), 1)
+        Device.default.synchronize()
+        self.assertEqual(bytes(decoded[0].data()), bytes(expected.data()))
+      self.assertEqual(decoder.Decode(b""), [])
     rgb = decoder.to_rgb(frames[0])
     self.assertEqual(rgb.shape, (h, w, 3))
 
