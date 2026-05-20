@@ -1,7 +1,7 @@
 import argparse, os, hashlib, functools
 from typing import Iterator, Callable
 from tinygrad.helpers import getenv, DEBUG, round_up, Timing, tqdm, fetch, ceildiv
-from extra.hevc.hevc import HevcParser, parse_hevc_file_headers, untile_nv12, to_bgr, nv_gpu
+from .hevc import HevcParser, parse_hevc_file_headers, untile_nv12, to_bgr, nv_gpu
 from tinygrad import Tensor, dtypes, Device, Variable, TinyJit
 
 # rounds up hevc input data to 32 bytes, so more optimal kernels can be generated
@@ -45,6 +45,7 @@ class HevcPacketDecoder:
     self.buf_slot, self.packet_bufs, self.opaque_bufs = 0, [], []
     self.out_bufs = [Tensor.empty(*self.out_image_size, dtype=dtypes.uint8, device=device).contiguous().realize() for _ in range(16)]
     self.out_rawbufs = [x._buffer() for x in self.out_bufs]
+    self.vid_ctx = Device[device]._alloc_vid_ctx(self.luma_w, self.luma_h)
 
   def _copy_to_slot(self, bufs, slot:int, dat:bytes):
     while len(bufs) <= slot: bufs.append(None)
@@ -70,7 +71,7 @@ class HevcPacketDecoder:
       bitstream = hevc_rawbuf if offset == 0 else hevc_tensor[offset:offset+ceildiv(sz, HEVC_ROUNDUP)*HEVC_ROUNDUP]._buffer()
       desc = opaque_rawbuf if i == 0 else opaque[i]._buffer()
       self.out_rawbufs[frame_pos].allocator._encode_decode(self.out_rawbufs[frame_pos]._buf, bitstream._buf, desc._buf,
-        [h._buffer()._buf for h in self.history], self.out_image_size, frame_pos)
+        [h._buffer()._buf for h in self.history], self.out_image_size, frame_pos, self.vid_ctx)
       ret.append(frame)
       if is_hist: self.history.append(frame)
       if len(self.history) >= self.parser.sps.sps_max_dec_pic_buffering[0]: self.history.pop(0)
