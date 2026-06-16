@@ -3,7 +3,7 @@ import unittest
 from tinygrad import Tensor, Device, dtypes
 from tinygrad.helpers import fetch, round_up
 from extra.hevc.hevc import parse_hevc_file_headers, nv_gpu
-from extra.hevc.decode import hevc_decode
+from extra.hevc.decode import HevcPacketDecoder, hevc_decode
 
 class TestHevc(unittest.TestCase):
   def test_hevc_parser(self):
@@ -17,6 +17,7 @@ class TestHevc(unittest.TestCase):
       self.assertEqual(frame0.pic_height_in_luma_samples, 1216)
       self.assertEqual(frame0.chroma_format_idc, 1)
       self.assertEqual(frame0.bit_depth_luma, 8)
+      self.assertEqual(parse_hevc_file_headers(dat[1:], device=Device.DEFAULT)[2:4], (w, h))
       self.assertEqual(frame0.bit_depth_chroma, 8)
       self.assertEqual(frame0.log2_min_luma_coding_block_size, 3)
       self.assertEqual(frame0.log2_max_luma_coding_block_size, 5)
@@ -82,6 +83,19 @@ class TestHevc(unittest.TestCase):
       self.assertEqual(f.shape, out_image_size)
       self.assertEqual(f.dtype, dtypes.uint8)
       self.assertEqual(f.device, "NV")
+
+    header = dat[:frame_info[0][0]]
+    packets = [dat[offset:offset+sz] for offset, sz, *_ in frame_info]
+    for _ in range(2):
+      decoder = HevcPacketDecoder(header)
+      for expected, packet in zip(frames, packets):
+        decoded = decoder.Decode(packet)
+        self.assertEqual(len(decoded), 1)
+        Device.default.synchronize()
+        self.assertEqual(bytes(decoded[0].data()), bytes(expected.data()))
+      self.assertEqual(decoder.Decode(b""), [])
+    rgb = decoder.to_rgb(frames[0])
+    self.assertEqual(rgb.shape, (h, w, 3))
 
 if __name__ == "__main__":
   unittest.main()

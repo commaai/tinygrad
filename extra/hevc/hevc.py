@@ -264,72 +264,70 @@ def fill_pps_into_dev_context(device_ctx, pps:PPS):
   device_ctx.log2_parallel_merge_level = pps.log2_parallel_merge_level
   device_ctx.loop_filter_across_tiles_enabled_flag = getattr(pps, 'loop_filter_across_tiles_enabled_flag', 0)
 
-def parse_hevc_file_headers(dat:bytes, device="NV"):
-  res = []
-  nal_unit_start = 1
-  history:list[tuple[int, int, int]] = []
-  device_ctx = nv_gpu.nvdec_hevc_pic_s(gptimer_timeout_value=92720000, tileformat=1, sw_start_code_e=1, pattern_id=2)
-  nal_infos = []
-  ctx_bytes = bytes()
+class HevcParser:
   align_ctx_bytes_size = 0x300
 
-  def _flush_picture():
-    nonlocal res, history, device_ctx, nal_infos, ctx_bytes, align_ctx_bytes_size
+  def __init__(self, header:bytes=b"", device="NV"):
+    self.device, self.res, self.history, self.nal_infos = device, [], [], []
+    self.device_ctx = nv_gpu.nvdec_hevc_pic_s(gptimer_timeout_value=92720000, tileformat=1, sw_start_code_e=1, pattern_id=2)
+    self.ctx_bytes = bytes()
+    if header: self.parse(header)
 
-    if not len(nal_infos): return
+  def _flush_picture(self):
+    if not len(self.nal_infos): return
 
-    hdr, nal_unit_type = nal_infos[0][0]
-    assert all(nal_unit_type == x[0][1] for x in nal_infos), "all NAL units in a picture must be of the same type"
+    sps, pps = self.sps, self.pps
+    hdr, nal_unit_type = self.nal_infos[0][0]
+    assert all(nal_unit_type == x[0][1] for x in self.nal_infos), "all NAL units in a picture must be of the same type"
 
-    device_ctx.curr_pic_idx = next(i for i in range(16) if all(d[0] != i for d in history))
+    self.device_ctx.curr_pic_idx = next(i for i in range(16) if all(d[0] != i for d in self.history))
 
     if nal_unit_type in {avcodec.HEVC_NAL_IDR_W_RADL, avcodec.HEVC_NAL_IDR_N_LP}:
-      history = []
+      self.history = []
 
-    device_ctx.num_ref_frames = len(history)
-    device_ctx.IDR_picture_flag = int(nal_unit_type in {avcodec.HEVC_NAL_IDR_W_RADL, avcodec.HEVC_NAL_IDR_N_LP})
-    device_ctx.RAP_picture_flag = int(nal_unit_type >= avcodec.HEVC_NAL_BLA_W_LP and nal_unit_type <= avcodec.HEVC_NAL_RSV_IRAP_VCL23)
-    device_ctx.RefDiffPicOrderCnts=(ctypes.c_int16 * 16)()
-    device_ctx.colMvBuffersize = (round_up(sps.pic_width_in_luma_samples, 64) * round_up(sps.pic_height_in_luma_samples, 64) // 16) // 256
-    device_ctx.framestride=(ctypes.c_uint32 * 2)(round_up(sps.pic_width_in_luma_samples, 64), round_up(sps.pic_width_in_luma_samples, 64))
-    device_ctx.sw_hdr_skip_length = hdr.sw_skip_end - hdr.sw_skip_start
-    device_ctx.num_bits_short_term_ref_pics_in_slice = max(0, device_ctx.sw_hdr_skip_length - 9)
-    device_ctx.stream_len = sum(x[2] for x in nal_infos)
+    self.device_ctx.num_ref_frames = len(self.history)
+    self.device_ctx.IDR_picture_flag = int(nal_unit_type in {avcodec.HEVC_NAL_IDR_W_RADL, avcodec.HEVC_NAL_IDR_N_LP})
+    self.device_ctx.RAP_picture_flag = int(nal_unit_type >= avcodec.HEVC_NAL_BLA_W_LP and nal_unit_type <= avcodec.HEVC_NAL_RSV_IRAP_VCL23)
+    self.device_ctx.RefDiffPicOrderCnts=(ctypes.c_int16 * 16)()
+    self.device_ctx.colMvBuffersize = (round_up(sps.pic_width_in_luma_samples, 64) * round_up(sps.pic_height_in_luma_samples, 64) // 16) // 256
+    self.device_ctx.framestride=(ctypes.c_uint32 * 2)(round_up(sps.pic_width_in_luma_samples, 64), round_up(sps.pic_width_in_luma_samples, 64))
+    self.device_ctx.sw_hdr_skip_length = hdr.sw_skip_end - hdr.sw_skip_start
+    self.device_ctx.num_bits_short_term_ref_pics_in_slice = max(0, self.device_ctx.sw_hdr_skip_length - 9)
+    self.device_ctx.stream_len = sum(x[2] for x in self.nal_infos)
 
     if pps.tiles_enabled_flag:
-      device_ctx.num_tile_columns = pps.num_tile_columns_minus1 + 1
-      device_ctx.num_tile_rows = pps.num_tile_rows_minus1 + 1
+      self.device_ctx.num_tile_columns = pps.num_tile_columns_minus1 + 1
+      self.device_ctx.num_tile_rows = pps.num_tile_rows_minus1 + 1
 
-    device_ctx.num_short_term_ref_pic_sets = sps.num_short_term_ref_pic_sets
+    self.device_ctx.num_short_term_ref_pic_sets = sps.num_short_term_ref_pic_sets
 
     luma_h_rounded = round_up(sps.pic_height_in_luma_samples, 64)
-    device_ctx.HevcSaoBufferOffset = (608 * luma_h_rounded) >> 8
-    device_ctx.HevcBsdCtrlOffset = ((device_ctx.HevcSaoBufferOffset<<8) + 4864 * luma_h_rounded) >> 8
+    self.device_ctx.HevcSaoBufferOffset = (608 * luma_h_rounded) >> 8
+    self.device_ctx.HevcBsdCtrlOffset = ((self.device_ctx.HevcSaoBufferOffset<<8) + 4864 * luma_h_rounded) >> 8
 
-    device_ctx.v1.hevc_main10_444_ext.HevcFltAboveOffset = ((device_ctx.HevcBsdCtrlOffset<<8) + 152 * luma_h_rounded) >> 8
-    device_ctx.v1.hevc_main10_444_ext.HevcSaoAboveOffset = ((device_ctx.v1.hevc_main10_444_ext.HevcFltAboveOffset<<8) + 2000 * luma_h_rounded) >> 8
-    device_ctx.v3.HevcSliceEdgeOffset = device_ctx.v1.hevc_main10_444_ext.HevcSaoAboveOffset
+    self.device_ctx.v1.hevc_main10_444_ext.HevcFltAboveOffset = ((self.device_ctx.HevcBsdCtrlOffset<<8) + 152 * luma_h_rounded) >> 8
+    self.device_ctx.v1.hevc_main10_444_ext.HevcSaoAboveOffset = ((self.device_ctx.v1.hevc_main10_444_ext.HevcFltAboveOffset<<8) + 2000 * luma_h_rounded) >> 8
+    self.device_ctx.v3.HevcSliceEdgeOffset = self.device_ctx.v1.hevc_main10_444_ext.HevcSaoAboveOffset
 
     before_list, after_list = [], []
-    for pic_idx, poc, _ in history:
-      device_ctx.RefDiffPicOrderCnts[pic_idx] = hdr.slice_pic_order_cnt_lsb - poc
+    for pic_idx, poc, _ in self.history:
+      self.device_ctx.RefDiffPicOrderCnts[pic_idx] = hdr.slice_pic_order_cnt_lsb - poc
       if hdr.slice_pic_order_cnt_lsb < poc: after_list.append((poc - hdr.slice_pic_order_cnt_lsb, pic_idx))
       else: before_list.append((hdr.slice_pic_order_cnt_lsb - poc, pic_idx))
     before_list.sort()
     after_list.sort()
 
-    device_ctx.initreflistidxl0 = (ctypes.c_uint8 * 16)(*[idx for _,idx in before_list + after_list])
-    if hdr.slice_type == avcodec.HEVC_SLICE_B: device_ctx.initreflistidxl1 = (ctypes.c_uint8 * 16)(*[idx for _,idx in after_list + before_list])
+    self.device_ctx.initreflistidxl0 = (ctypes.c_uint8 * 16)(*[idx for _,idx in before_list + after_list])
+    if hdr.slice_type == avcodec.HEVC_SLICE_B: self.device_ctx.initreflistidxl1 = (ctypes.c_uint8 * 16)(*[idx for _,idx in after_list + before_list])
 
-    locl_ctx_bytes = bytes(device_ctx)
+    locl_ctx_bytes = bytes(self.device_ctx)
     locl_ctx_bytes += b'\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00' # blackwell extension
     locl_ctx_bytes += bytes(0x200 - len(locl_ctx_bytes)) # pad to 512 bytes
 
     pic_width_in_ctbs = ceildiv(sps.pic_width_in_luma_samples, (1 << sps.log2_max_luma_coding_block_size))
     pic_height_in_ctbs = ceildiv(sps.pic_height_in_luma_samples, (1 << sps.log2_max_luma_coding_block_size))
-    # append tile sizes 0x200
     if pps.tiles_enabled_flag and pps.uniform_spacing_flag:
-      assert device_ctx.num_tile_columns == 1 and device_ctx.num_tile_rows == 1, "not implemented: uniform spacing with multiple tiles"
+      assert self.device_ctx.num_tile_columns == 1 and self.device_ctx.num_tile_rows == 1, "not implemented: uniform spacing with multiple tiles"
       locl_ctx_bytes += pic_width_in_ctbs.to_bytes(2, "little") + pic_height_in_ctbs.to_bytes(2, "little")
     else:
       if pps.tiles_enabled_flag and not getattr(pps, 'uniform_spacing_flag', 0):
@@ -345,55 +343,57 @@ def parse_hevc_file_headers(dat:bytes, device="NV"):
       for c in column_width:
         for r in row_height: locl_ctx_bytes += c.to_bytes(2, "little") + r.to_bytes(2, "little")
 
-    luma_size = round_up(sps.pic_width_in_luma_samples, 64) * round_up(sps.pic_height_in_luma_samples, 64)
-    chroma_size = round_up(sps.pic_width_in_luma_samples, 64) * round_up((sps.pic_height_in_luma_samples + 1) // 2, 64)
     is_hist = nal_unit_type in {avcodec.HEVC_NAL_TRAIL_R, avcodec.HEVC_NAL_IDR_N_LP, avcodec.HEVC_NAL_IDR_W_RADL}
+    self.res.append((self.nal_infos[0][1], self.device_ctx.stream_len, self.device_ctx.curr_pic_idx, len(self.history), is_hist))
 
-    res.append((nal_infos[0][1], device_ctx.stream_len, device_ctx.curr_pic_idx, len(history), is_hist))
+    locl_ctx_bytes += (self.align_ctx_bytes_size - len(locl_ctx_bytes)) * b'\x00'
+    self.ctx_bytes += locl_ctx_bytes
 
-    locl_ctx_bytes += (align_ctx_bytes_size - len(locl_ctx_bytes)) * b'\x00'
-    ctx_bytes += locl_ctx_bytes
+    if is_hist: self.history.append((self.device_ctx.curr_pic_idx, hdr.slice_pic_order_cnt_lsb, None))
+    if len(self.history) >= sps.sps_max_dec_pic_buffering[0]: self.history.pop(0)
+    self.nal_infos = []
 
-    if nal_unit_type in {avcodec.HEVC_NAL_TRAIL_R, avcodec.HEVC_NAL_IDR_N_LP, avcodec.HEVC_NAL_IDR_W_RADL}:
-      history.append((device_ctx.curr_pic_idx, hdr.slice_pic_order_cnt_lsb, None))
+  def parse(self, dat:bytes, tensor=True):
+    start_res, start_ctx = len(self.res), len(self.ctx_bytes)
+    nal_unit_start = dat.find(b"\x00\x00\x01")
+    while nal_unit_start != -1 and nal_unit_start < len(dat):
+      assert dat[nal_unit_start:nal_unit_start+3] == b"\x00\x00\x01", "NAL unit start code not found"
 
-    if len(history) >= sps.sps_max_dec_pic_buffering[0]:
-      # remove the oldest poc
-      history.pop(0)
+      pos = dat.find(b"\x00\x00\x01", nal_unit_start + 3)
+      nal_unit_len = (pos if pos != -1 else len(dat)) - nal_unit_start
+      nal_unit_type = (dat[nal_unit_start+3] >> 1) & 0x3F
+      slice_dat = dat[nal_unit_start+5:nal_unit_start+nal_unit_len]
 
-    nal_infos = []
+      if nal_unit_type == avcodec.HEVC_NAL_SPS:
+        self.sps = SPS(BitReader(_hevc_get_rbsp(slice_dat)))
+        fill_sps_into_dev_context(self.device_ctx, self.sps)
+      elif nal_unit_type == avcodec.HEVC_NAL_PPS:
+        self.pps = PPS(BitReader(_hevc_get_rbsp(slice_dat)))
+        fill_pps_into_dev_context(self.device_ctx, self.pps)
+      elif nal_unit_type in {avcodec.HEVC_NAL_IDR_N_LP, avcodec.HEVC_NAL_IDR_W_RADL, avcodec.HEVC_NAL_TRAIL_R, avcodec.HEVC_NAL_TRAIL_N}:
+        hdr = SliceSegment(BitReader(slice_dat), nal_unit_type, self.sps, self.pps)
+        if hdr.first_slice_segment_in_pic_flag == 1: self._flush_picture()
+        self.nal_infos.append(((hdr, nal_unit_type), nal_unit_start, nal_unit_len))
 
-  cnt = 0
-  while nal_unit_start < len(dat):
-    assert dat[nal_unit_start:nal_unit_start+3] == b"\x00\x00\x01", "NAL unit start code not found"
+      nal_unit_start += nal_unit_len
+    self._flush_picture()
 
-    pos = dat.find(b"\x00\x00\x01", nal_unit_start + 3)
-    nal_unit_len = (pos if pos != -1 else len(dat)) - nal_unit_start
+    frame_info = self.res[start_res:]
+    ctx = self.ctx_bytes[start_ctx:]
+    opaque = Tensor(ctx, device=self.device).reshape(len(frame_info), self.align_ctx_bytes_size) if tensor else ctx
+    return opaque, frame_info
 
-    # 7.3.1.1 General NAL unit syntax
-    nal_unit_type = (dat[nal_unit_start+3] >> 1) & 0x3F
-    slice_dat = dat[nal_unit_start+5:nal_unit_start+nal_unit_len]
+  def dimensions(self):
+    sps = self.sps
+    w = sps.pic_width_in_luma_samples - 2 * (sps.conf_win_left_offset + sps.conf_win_right_offset)
+    h = sps.pic_height_in_luma_samples - 2 * (sps.conf_win_top_offset  + sps.conf_win_bottom_offset)
+    chroma_off = round_up(sps.pic_width_in_luma_samples, 64) * round_up(sps.pic_height_in_luma_samples, 64)
+    return w, h, sps.pic_width_in_luma_samples, sps.pic_height_in_luma_samples, chroma_off
 
-    if nal_unit_type == avcodec.HEVC_NAL_SPS:
-      sps = SPS(BitReader(_hevc_get_rbsp(slice_dat)))
-      fill_sps_into_dev_context(device_ctx, sps)
-    elif nal_unit_type == avcodec.HEVC_NAL_PPS:
-      pps = PPS(BitReader(_hevc_get_rbsp(slice_dat)))
-      fill_pps_into_dev_context(device_ctx, pps)
-    elif nal_unit_type in {avcodec.HEVC_NAL_IDR_N_LP, avcodec.HEVC_NAL_IDR_W_RADL, avcodec.HEVC_NAL_TRAIL_R, avcodec.HEVC_NAL_TRAIL_N}:
-      hdr = SliceSegment(BitReader(slice_dat), nal_unit_type, sps, pps)
-
-      if hdr.first_slice_segment_in_pic_flag == 1: _flush_picture()
-      nal_infos.append(((hdr, nal_unit_type), nal_unit_start, nal_unit_len))
-
-    nal_unit_start += nal_unit_len
-  _flush_picture()
-
-  w = sps.pic_width_in_luma_samples - 2 * (sps.conf_win_left_offset + sps.conf_win_right_offset)
-  h = sps.pic_height_in_luma_samples - 2 * (sps.conf_win_top_offset  + sps.conf_win_bottom_offset)
-  chroma_off = round_up(sps.pic_width_in_luma_samples, 64) * round_up(sps.pic_height_in_luma_samples, 64)
-  opaque = Tensor(ctx_bytes, device=device).reshape(len(res), align_ctx_bytes_size)
-  return opaque, res, w, h, sps.pic_width_in_luma_samples, sps.pic_height_in_luma_samples, chroma_off
+def parse_hevc_file_headers(dat:bytes, device="NV"):
+  parser = HevcParser(device=device)
+  opaque, res = parser.parse(dat)
+  return opaque, res, *parser.dimensions()
 
 def _addr_table(h, w, w_aligned):
   GOB_W, GOB_H = 64, 8
