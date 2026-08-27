@@ -183,6 +183,22 @@ def exec_copy(ctx:ExecContext, call:UOp, ast:UOp) -> list[float|None]:
     else: dest.allocator._copyin(dest._buf, src.as_memoryview(allow_zero_copy=True))
   return []
 
+def exec_copyin_batch(ctx:ExecContext, calls:Sequence[UOp]) -> bool:
+  """Batch adjacent host-to-device copies when the destination allocator supports it."""
+  allocator, copies = None, []
+  for call in calls:
+    lanes = list(unwrap_multi(call, resolve_params(call, ctx.input_uops)))
+    if len(lanes) != 1: return False
+    bufs, _ = lanes[0]
+    dest, src = bufs[0].ensure_allocated(), bufs[1].ensure_allocated()
+    if allocator is None:
+      allocator = dest.allocator
+      if not getattr(allocator, 'supports_copyin_batch', False): return False
+    elif dest.allocator is not allocator: return False
+    copies.append((dest, src))
+  allocator._copyin_batch(tuple((dest._buf, src.as_memoryview(allow_zero_copy=True)) for dest, src in copies))
+  return True
+
 def exec_kernel(ctx:ExecContext, call:UOp, ast:UOp) -> list[float|None]:
   ets:list[float|None] = []
   resolved = resolve_params(call, ctx.input_uops)
@@ -321,7 +337,19 @@ def run_linear(linear:UOp, var_vals:dict[str, int]|None=None, input_uops:Sequenc
   inputs = list(input_uops)
   if not jit: linear = link_linear(compile_linear(linear, validate=VALIDATE_WITH_CPU, input_uops=inputs))
   ctx = ExecContext(var_vals or {}, tuple(inputs), update_stats, jit, wait or DEBUG>=2)
-  for call in linear.src: track_stats(ctx, call, perf_counter_us(), pm_exec.rewrite(call, ctx))
+  i = 0
+  while i < len(linear.src):
+    call = linear.src[i]
+    if call.src[0].op is Ops.COPY:
+      end = i + 1
+      while end < len(linear.src) and linear.src[end].src[0].op is Ops.COPY: end += 1
+      st = perf_counter_us()
+      if exec_copyin_batch(ctx, linear.src[i:end]):
+        for batch_call in linear.src[i:end]: track_stats(ctx, batch_call, st, [])
+        i = end
+        continue
+    track_stats(ctx, call, perf_counter_us(), pm_exec.rewrite(call, ctx))
+    i += 1
 
 def time_call(call:UOp, var_vals:dict[str, int]|None=None, timeout:int|None=None, clear_l2:bool=False) -> Iterator[float]:
   ctx = ExecContext(var_vals or {}, update_stats=False, wait=True, timeout=timeout, cache=False)

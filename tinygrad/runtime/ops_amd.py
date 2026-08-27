@@ -643,6 +643,7 @@ class AMDAllocator(HCQAllocator['AMDDevice']):
   def __init__(self, dev:AMDDevice):
     super().__init__(dev, copy_bufs=getattr(dev.iface, 'copy_bufs', None),
                      supports_copy_from_disk=dev.has_sdma_queue, supports_transfer=dev.has_sdma_queue and not dev.is_usb())
+    self.supports_copyin_batch = dev.is_usb()
 
   def _alloc(self, size:int, options:BufferSpec) -> HCQBuffer:
     return self.dev.iface.alloc(size, host=options.host, uncached=options.uncached, cpu_access=options.cpu_access or not self.dev.has_sdma_queue)
@@ -653,14 +654,26 @@ class AMDAllocator(HCQAllocator['AMDDevice']):
 
   def _copyin(self, dest:HCQBuffer, src:memoryview):
     if not self.dev.is_usb(): return super()._copyin(dest, src)
+    return self._copyin_batch(((dest, src),))
+
+  def _copyin_batch(self, copies):
+    assert self.dev.is_usb()
     from tinygrad.runtime.support.usb import alloc_cbuffer
     # Pipelined copyin over the 0xF2 engine. ~256KB chunks stream into two alternating 256KB SRAM bounce windows; the
     # engine can't signal data landing, so each chunk's wire image ends in a 4B sentinel tagged with its sequence number.
     # A prebuilt SDMA ring polls each chunk's sentinel before copying it to VRAM, then bumps a drain fence; the host
     # waits on that fence before re-arming a window. No timing is assumed in either direction.
     dev, usb, ts, sdma = self.dev, self.dev.iface.pci_dev.usb, self.dev.timeline_signal, self.dev.sdma
-    CHUNK, src_mv = 0x40000 - 4, src.cast('B')  # payload per chunk: the 256KB window minus the 4B trailing sentinel
-    nchunks = ceildiv(src.nbytes, CHUNK)
+    CHUNK = 0x40000 - 4  # payload per chunk: the 256KB window minus the 4B trailing sentinel
+    copies = tuple((dest, src.cast('B')) for dest, src in copies)
+    offsets = (0, *itertools.accumulate(src.nbytes for _, src in copies))
+    chunks = []
+    for chunk_start in range(0, offsets[-1], CHUNK):
+      chunk_end = min(chunk_start + CHUNK, offsets[-1])
+      segments = [(dest, src, max(chunk_start, start) - start, max(start - chunk_start, 0), min(end, chunk_end) - max(start, chunk_start))
+                  for (dest, src), start, end in zip(copies, offsets, offsets[1:]) if start < chunk_end and end > chunk_start]
+      chunks.append((chunk_end - chunk_start, segments))
+    nchunks = len(chunks)
     FENCE = 0xA800  # drain fence: the GPU writes it via sys_buf (PCIe 0x820800), the host reads it here (xdata)
     if not hasattr(self, '_usb_seq'):  # one-time: clear the fence and zero both windows so garbage can't match a sentinel
       self._usb_seq, self._usb_stage = 0, [alloc_cbuffer(0x40000) for _ in range(2)]  # (backing array, memoryview) pairs
@@ -677,22 +690,25 @@ class AMDAllocator(HCQAllocator['AMDDevice']):
     POLL_EQ = sdma.SDMA_OP_POLL_REGMEM | sdma.SDMA_PKT_POLL_REGMEM_HEADER_FUNC(3) | sdma.SDMA_PKT_POLL_REGMEM_HEADER_MEM_POLL(1)
     POLL_DW5 = sdma.SDMA_PKT_POLL_REGMEM_DW5_INTERVAL(0x04) | sdma.SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT(0xfff)
     q = dev.hw_copy_queue_t().wait(ts, dev.timeline_value - 1)
-    for c in range(nchunks):
-      seq, size = self._usb_seq + c, min(CHUNK, src.nbytes - c * CHUNK)
-      q.q(POLL_EQ, *data64_le(self._usb_wins[seq & 1].va_addr + round_up(size + 4, 512) - 4), 0x51000000 | (seq & 0xFFFFFF), 0xFFFFFFFF, POLL_DW5)
-      q.copy(dest.offset(c * CHUNK), self._usb_wins[seq & 1], size)
+    for c, (payload_size, segments) in enumerate(chunks):
+      seq = self._usb_seq + c
+      sentinel_addr = self._usb_wins[seq & 1].va_addr + round_up(payload_size + 4, 512) - 4
+      q.q(POLL_EQ, *data64_le(sentinel_addr), 0x51000000 | (seq & 0xFFFFFF), 0xFFFFFFFF, POLL_DW5)
+      for dest, _, dest_off, win_off, size in segments:
+        q.copy(dest.offset(dest_off), self._usb_wins[seq & 1].offset(win_off), size)
       q.write(dev.iface.sys_buf.offset(0x800, 8), seq + 1, b64=True)
     q.signal(ts, dev.next_timeline()).submit(dev)
 
     # stream the chunks: stage the wire image [payload][sentinel], arm the window, send. A window is reusable once
     # its previous occupant (seq-2) is both fully sent (tag reaped) and fully drained to VRAM (the fence).
     inflight = [None, None]
-    for c in range(nchunks):
-      seq, size = self._usb_seq + c, min(CHUNK, src.nbytes - c * CHUNK)
+    for c, (payload_size, segments) in enumerate(chunks):
+      seq = self._usb_seq + c
       if inflight[seq & 1] is not None: usb.usb.bulk_wait(inflight[seq & 1])
       buf = self._usb_stage[seq & 1][1]
-      buf[:size] = src_mv[c * CHUNK : c * CHUNK + size]
-      wire = round_up(size + 4, 512)  # payload plus the sentinel, padded to 512B sectors (full window for max chunks)
+      for _, src_mv, src_off, win_off, size in segments:
+        buf[win_off:win_off + size] = src_mv[src_off:src_off + size]
+      wire = round_up(payload_size + 4, 512)  # payload plus the sentinel, padded to 512B sectors (full window for max chunks)
       struct.pack_into('<I', buf, wire - 4, 0x51000000 | (seq & 0xFFFFFF))  # the sentinel is the last dword of the wire
       arm_tag = usb.usb.control_write_async(0xF2, wire // 512, (seq & 1) * 16 | (ceildiv(wire, 0x4000) << 8))  # wValue=sectors, wIndex=slot|count
       rd_tag, rd_mv = usb.usb.control_read_async(0xE4, 8, value=FENCE)  # arm and fence read fly in one round-trip window
