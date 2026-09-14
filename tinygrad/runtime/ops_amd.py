@@ -399,7 +399,7 @@ class AMDComputeQueue(HWQueue):
     self.binded_device = dev
     self.hw_page = dev.allocator.alloc(len(self._q) * 4, BufferSpec(cpu_access=True, nolru=True, uncached=True))
     hw_view = self.hw_page.cpu_view().view(fmt='I')
-    for i, value in enumerate(self._q): hw_view[i] = value
+    hw_view[:len(self._q)] = array.array('I', self._q)
 
     self.indirect_cmd = [self.pm4.PACKET3(self.pm4.PACKET3_INDIRECT_BUFFER, 2), *data64_le(self.hw_page.va_addr),
                          len(self._q) | self.pm4.INDIRECT_BUFFER_VALID]
@@ -416,7 +416,10 @@ class AMDComputeQueue(HWQueue):
       cmds = [self.pm4.PACKET3(self.pm4.PACKET3_INDIRECT_BUFFER, 2), *data64_le(ib_ptr), len(cmds) | self.pm4.INDIRECT_BUFFER_VALID,
               self.pm4.PACKET3(self.pm4.PACKET3_NOP, ib_pad + len(cmds) - 1), *((0,) * ib_pad), *cmds]
 
-    for i, value in enumerate(cmds): dev.compute_queue.ring[(dev.compute_queue.put_value + i) % len(dev.compute_queue.ring)] = value
+    start = dev.compute_queue.put_value % len(dev.compute_queue.ring)
+    tail = min(len(cmds), len(dev.compute_queue.ring) - start)
+    dev.compute_queue.ring[start:start + tail] = array.array('I', cmds[:tail])
+    if tail < len(cmds): dev.compute_queue.ring[:len(cmds) - tail] = array.array('I', cmds[tail:])
 
     dev.compute_queue.put_value += len(cmds)
     dev.compute_queue.signal_doorbell(dev)
