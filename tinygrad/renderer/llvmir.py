@@ -58,6 +58,9 @@ def render_wmma_amd(ctx, wmma: UOp, cdna=False, rdna4=False) -> str:
   # https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/GlobalISel/llvm.amdgcn.wmma_32.ll
   # example: %wmma0 = call <8 x float> @llvm.amdgcn.wmma.f32.16x16x16.f16(<16 x half> %v99,<16 x half> %v100,<8 x float> %v101)
   args = [f"{ldt(w.dtype, w.max_numel())} {ctx[w]}" for w in wmma.src]
+  if rdna4 and wmma.arg[1] in dtypes.fp8_ocp:
+    kind = "fp8" if wmma.arg[1] == dtypes.fp8e4m3 else "bf8"
+    return f"  {ctx[wmma]} = call <8 x float> @llvm.amdgcn.wmma.f32.16x16x16.{kind}.{kind}.v8f32.v2i32(" + ", ".join(args) + ")"
   if wmma.arg[1] == dtypes.int8: args = ["i1 true", args[0], "i1 true", args[1], args[2]]  # iu8 flags A/B signed
   if wmma.dtype != dtypes.float: args.append("i1 false") # opsel
   def _bf16(dt:DType): return dtypes.ushort if dt is dtypes.bfloat16 else dt
@@ -283,4 +286,5 @@ exit: %packed = phi i32 [%packed_bf8, %do_bf8], [%packed_fp8, %do_fp8]\n  %trunc
     if target.arch in {"gfx1200", "gfx1201"}: self.extra_matcher += tc.pm_validate_wmma_rdna4
 
   def supported_dtypes(self): return {d for d in super().supported_dtypes()
-                                      if (d not in dtypes.fp8_ocp or self.target.arch == "gfx950") and d not in dtypes.fp8_fnuz}
+                                      if (d not in dtypes.fp8_ocp or self.target.arch == "gfx950" or self.is_rdna4(self.target.arch))
+                                      and d not in dtypes.fp8_fnuz}

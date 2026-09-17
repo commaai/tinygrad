@@ -526,7 +526,7 @@ class HIPRenderer(CStyleLanguage):
   type_map = {dtypes.bfloat16: "hip_bfloat16", dtypes.fp8e4m3: "hip_fp8", dtypes.fp8e5m2: "hip_bf8"}
   extra_matcher = create_non_native_float_pats((dtypes.bfloat16, *dtypes.fp8s)) + PatternMatcher([
     (UPat(Ops.WMMA, name="x", dtype=dtypes.float),
-      lambda x: x.replace(src=(x.src[0].bitcast(dtypes.uint64), x.src[1].bitcast(dtypes.uint64), x.src[2]))
+      lambda x: x.replace(src=(*(s.bitcast(dtypes.uint32 if x.max_numel() == 8 else dtypes.uint64) for s in x.src[:2]), x.src[2]))
       if x.src[0].max_numel() == 8 and x.src[0].dtype in dtypes.fp8_ocp else None),
   ])
 
@@ -572,7 +572,8 @@ class HIPRenderer(CStyleLanguage):
         prefix.append(f"#define __{name} __builtin_amdgcn_mfma_{'scale_' if K == 128 else ''}f32_{N}x{M}x{K}{type_map[dtype_in]}")
       # #define __WMMA_16_16_16_half_half __builtin_amdgcn_wmma_f16_16x16x16_f16_w32_gfx12
       elif self.tensor_cores == tc.amd_rdna4:
-        prefix.append(f"#define __{name} __builtin_amdgcn_wmma_{type_map[dtype_out]}_16x16x16_{type_map[dtype_in]}_w32_gfx12")
+        prefix.append(f"#define __{name} __builtin_amdgcn_wmma_{type_map[dtype_out]}_16x16x16_"+
+                      f"{type_map[dtype_in].lstrip('_')}_w32_gfx12")
       elif dtype_out == dtypes.int32:
         prefix.append("typedef int wmma_int4 __attribute__((ext_vector_type(4)));\n"+
           f"static inline __attribute__((device)) int8 __{name}"+"""(signed_char16 a, signed_char16 b, int8 c) {
@@ -587,7 +588,8 @@ class HIPRenderer(CStyleLanguage):
     return super().render_kernel(function_name, kernel, bufs, uops, prefix)
 
   def supported_dtypes(self): return {d for d in super().supported_dtypes()
-                                      if (d not in dtypes.fp8_ocp or self.target.arch == "gfx950") and d not in dtypes.fp8_fnuz}
+                                      if (d not in dtypes.fp8_ocp or self.target.arch in {"gfx950", "gfx1200", "gfx1201"})
+                                      and d not in dtypes.fp8_fnuz}
 
 class HIPCCRenderer(HIPRenderer):
   def __init__(self, target:Target): super().__init__(target, use_hipcc=True)
