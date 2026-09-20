@@ -373,20 +373,15 @@ def usb_drained(h:UOp, need:UOp) -> UOp: # wait for fence == need - 1 or need, m
 def usb_chunk(h:UOp, table:UOp, i:UOp, half:int, run:int) -> UOp: # send chunk i, numbered run + i
   addr, size = table.index(2 * i).load(), table.index(2 * i + 1).load().cast(dtypes.int)
   n, wire, end = (i + run).cast(dtypes.uint64), cast(UOp, usb_wire(size)), (half + 1) * HALF
-  xfer, stage = usb_xfer(h.device, half), usb_stage(h.device)
+  stage = usb_stage(h.device)
 
-  # reuse the host buffer after its transfer completes
-  h = h.after(usb_reap(h, xfer))
   h = h.after(ccall(libc.memcpy, stage.after(h).index(end - wire), addr, size.cast(dtypes.uint64)))
   h = h.after(stage.after(h).bitcast(dtypes.uint32).index(end // 4 - 1).store(usb_sentinel(n)))
 
   # reuse sram after the GPU copy completes
   h = h.after(usb_drained(h, n))
   h = h.after(usb_ctrl(h, 0x40, 0xF2, wire // 512, ((end - wire) // SLOT) | (wire // SLOT << 8), UOp.const(0, dtypes.uint64), 0))
-  field = functools.partial(cfield, xfer:=xfer.after(h), libusb.struct_libusb_transfer)
-  xfer = xfer.after(field("status").store(0xff), field("length").store(wire.cast(dtypes.uint)),
-                    field("buffer").store(rt_addr(stage) + (end - wire).cast(dtypes.uint64)))
-  return ccall(libusb.libusb_submit_transfer, xfer.index(0))
+  return usb_bulk(h, 0x02, stage.after(h).index(end - wire), wire)
 
 def usb_copyin(h:UOp, chunks:list, run:int) -> UOp: # pipeline writes through two halves
   table, n = usb_table(chunks, h.device), len(chunks)
