@@ -30,6 +30,7 @@ class HCQInfo:
   slots:tuple[tuple[str, int], ...] = () # per device, the position of its batch slots in the args
   host_deps:tuple[tuple[str, str], ...] = () # (memory owner, accessing device)
   written_bufs:tuple[UOp, ...] = () # write args
+  errors:tuple[tuple[int, str], ...] = ()
 
   skip_wait:bool = False # TODO: remove. an rdma copy between nodes is two batches, so waiting on the first alone deadlocks
 
@@ -107,6 +108,12 @@ def cstruct(struct_t, **fields:UOp|int) -> UOp:
   return patch(buf, rows, bytes(ctypes.sizeof(struct_t)))
 
 def cfield(buf:UOp, struct_t, name:str) -> UOp: return buf[(f:=getattr(struct_t, name)).offset:f.offset + f.size].bitcast(CDTYPE[f.size]).index(0)
+
+def hcq_check(value:UOp, expected:UOp|int, name:str) -> UOp:
+  expected = expected if isinstance(expected, UOp) else UOp.const(expected, value.dtype)
+  error = UOp.param(0, dtypes.int64, (2,), HCQ_RUNTIME_DEV.value, name="hcq_error").replace(tag=f"hcq_error:{name}")
+  error = patch(error, [], bytes(16))
+  return UOp(Ops.INS, arg=("check", dtypes.void), src=(value.cast(dtypes.int64), expected.cast(dtypes.int64), error.index(0)))
 
 # *****************
 # 0.1. prep: eager buffers become tagged params
@@ -497,7 +504,8 @@ def lower_call(call:UOp) -> UOp|None:
   if VIZ: graph_rewrite(sink, PatternMatcher([]), name="View Body")
 
   info = replace(call.arg.aux, nargs=len(bufs), table=bufs.index(table) if table in bufs else -1, inputs=tuple(ctx.inputs),
-                 slots=tuple((to_tuple(b.device)[0], i) for i, b in enumerate(bufs) if b.tag == "slots"))
+                 slots=tuple((to_tuple(b.device)[0], i) for i, b in enumerate(bufs) if b.tag == "slots"),
+                 errors=tuple((i, b.tag[10:]) for i, b in enumerate(bufs) if isinstance(b.tag, str) and b.tag.startswith("hcq_error:")))
   return call.replace(src=(sink, *bufs), arg=replace(call.arg, aux=info)).after(*patches)
 pm_encode = PatternMatcher([(UPat(Ops.CALL, src=(UPat(Ops.SINK),), name="call", allow_any_len=True), lower_call)])
 

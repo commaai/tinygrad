@@ -198,12 +198,21 @@ def exec_graph(ctx:ExecContext, call:UOp, ast:UOp) -> list[float|None]:
   return [get_graph_runtime(ast, ctx.input_uops)(ctx.input_uops, ctx.var_vals, wait=ctx.wait)]
 
 def exec_hcq(ctx:ExecContext, call:UOp, ast:UOp) -> list[float|None]:
-  if (info:=call.arg.aux).inputs:
+  info = call.arg.aux
+  for dev in info.device:
+    if (error:=Device[dev].hcq_error) is not None: raise error
+  if info.inputs:
     addrs = [cast(Buffer, _resolve(u, ctx.input_uops).buffer).get_buf(dev) + off for u, dev, off in info.inputs]
     cast(Buffer, call.src[1 + info.table].buffer).host.view(fmt='Q')[:] = array.array('Q', addrs)
   ctx = replace(ctx, wait=ctx.wait and not info.skip_wait,
                 var_vals={**ctx.var_vals, **{k: v for d in info.device for k, v in cast(Any, Device[d]).var_vals.items()}})
   ets = exec_kernel(ctx, call, ast, devices=(Device[info.device[0]].host,))
+  for i, name in info.errors:
+    actual, expected = cast(Buffer, call.src[1 + i].buffer).host.view(fmt='q')[:2]
+    if actual != expected:
+      error = RuntimeError(f"{name}: got {actual}, expected {expected}")
+      for dev in info.device: Device[dev].hcq_error = error
+      raise error
   for host, dev in info.host_deps: Device[host].pending[Device[dev]] = Device[dev].timeline.host.view(fmt='Q')[1]
   if not (ctx.wait or PROFILE): return ets
 

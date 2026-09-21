@@ -416,6 +416,7 @@ class Compiled:
   pm_batch:Any = None
   pm_encode:Any = None
   pm_lower:Any = None
+  hcq_error:RuntimeError|None = None
 
   def __init__(self, device:str, allocator:Allocator, renderers:list[type[Renderer]], runtime:type[Program[Self]]|None, graph=None, arch=None):
     from tinygrad.renderer import Renderer
@@ -477,6 +478,7 @@ class Compiled:
       elif self.sleep_timeout_ms is not None and elapsed > self.sleep_timeout_ms / 1000: self.on_sleep()
 
   def synchronize(self, timeout:int|None=None):
+    if self.hcq_error is not None: raise self.hcq_error
     try:
       self._wait_signal(tl:=self.timeline.host.view(fmt='Q'), tl[1], timeout)
       for d, v in self.pending.items(): d._wait_signal(d.timeline.host.view(fmt='Q'), v, timeout)
