@@ -506,6 +506,7 @@ class Compiled:
     """
     try: self.synchronize() # try to finalize the device in any case
     except RuntimeError as e: print(f"{self.device} synchronization failed before finalizing: {e}")
+    if self.hcq_error is not None: return
     if hasattr(self, 'iface') and hasattr(self.iface, 'device_fini'): self.iface.device_fini()
 
   # helpers
