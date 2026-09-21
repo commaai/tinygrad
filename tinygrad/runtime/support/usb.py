@@ -6,7 +6,7 @@ from tinygrad.dtype import dtypes, DType, AddrSpace
 from tinygrad.uop.ops import UOp, UPat, Ops, PatternMatcher, graph_rewrite
 from tinygrad.engine.realize import pm_flatten_linear
 from tinygrad.device import Buffer, BufferSpec
-from tinygrad.runtime.support.hcq2 import HCQ_RUNTIME_DEV, HCQ_DEVS, ccall, cfield, patch, rt_addr, unwrap_view, all_devices_in
+from tinygrad.runtime.support.hcq2 import HCQ_RUNTIME_DEV, HCQ_DEVS, ccall, cfield, patch, rt_addr, unwrap_view, all_devices_in, hcq_check
 from tinygrad.runtime.support.hcq import MMIOInterface
 from tinygrad.runtime.support import c
 
@@ -277,10 +277,24 @@ def usb_stack(dt:DType, *vals:UOp|int) -> UOp: # stack array for transfer data
   return r.after(*[r.index(i).store(v.cast(dt) if isinstance(v, UOp) else UOp.const(v, dt)) for i, v in enumerate(vals)])
 
 def usb_ctrl(h:UOp, rtype:int, req:int, val:UOp|int, idx:UOp|int, data:UOp, n:UOp|int, timeout:int=1000) -> UOp:
-  return ccall(libusb.libusb_control_transfer, h.index(0).load(), rtype, req, val, idx, data, n, timeout)
+  ret = ccall(libusb.libusb_control_transfer, h.index(0).load(), rtype, req, val, idx, data, n, timeout)
+  return hcq_check(ret, n, f"USB control {rtype:#x}/{req:#x}")
 
-def usb_bulk(h:UOp, ep:int, data:UOp, n:UOp|int, timeout:int=10000) -> UOp: # NULL actual_length
-  return ccall(libusb.libusb_bulk_transfer, h.index(0).load(), ep, data, n, UOp.const(0, dtypes.uint64), timeout)
+def usb_bulk(h:UOp, ep:int, data:UOp, n:UOp|int, timeout:int=10000) -> UOp:
+  actual = usb_stack(dtypes.int, 0)
+  ret = ccall(libusb.libusb_bulk_transfer, h.index(0).load(), ep, data, n, actual.index(0), timeout)
+  status = hcq_check(ret, 0, f"USB bulk {ep:#x}")
+  return hcq_check(actual.after(status).index(0).load(), n, f"USB bulk {ep:#x} length")
+
+def usb_millis(h:UOp) -> UOp:
+  ts = usb_stack(dtypes.int64, 0, 0)
+  stamp = ccall(libc.dll.clock_gettime, time.CLOCK_MONOTONIC, ts.after(h).index(0))
+  ts = ts.after(stamp)
+  return ts.index(0).load() * 1000 + ts.index(1).load() // 1000000
+
+def usb_timeout(h:UOp, start:UOp, pending:UOp, name:str) -> UOp:
+  expired = pending & ((usb_millis(h) - start) >= 10000)
+  return hcq_check(expired.where(-7, 0).cast(dtypes.int), 0, name)
 
 def usb_poke(h:UOp, addr:UOp, val:UOp) -> UOp: # 0xF0 mode 0: write a dword
   return usb_ctrl(h, 0x40, 0xF0, 0x60 | 0x0F00, 0, usb_stack(dtypes.uint64, addr, val.bitcast(dtypes.uint32).cast(dtypes.uint64)).index(0), 12, 5000)
@@ -360,15 +374,23 @@ def usb_table(chunks:list[tuple[UOp, int, int]], dev) -> UOp: # [host address, b
   return patch(table, rows + [(16 * i + 8, UOp.const(nb, dtypes.uint64)) for i, (_, _, nb) in enumerate(chunks)])
 
 def usb_reap(h:UOp, xfer:UOp) -> UOp: # poll while pending (0xff); idle transfers return
-  loop = UOp.range(UOp(Ops.NOOP), next(UOp.unique_num), dtype=dtypes.void, src=(h,))
-  events = ccall(libusb.libusb_handle_events_timeout, h.after(loop).index(1).load(), usb_stack(dtypes.uint64, 0, 0).index(0)) # zero timeout
+  start = usb_millis(h)
+  loop = UOp.range(UOp(Ops.NOOP), next(UOp.unique_num), dtype=dtypes.void, src=(h, start))
+  ret = ccall(libusb.libusb_handle_events_timeout, h.after(loop).index(1).load(), usb_stack(dtypes.uint64, 0, 0).index(0)) # zero timeout
+  events = hcq_check(ret, 0, "USB event handling")
   status = cfield(xfer.after(events), libusb.struct_libusb_transfer, "status").load()
-  return status.end(loop, status.eq(0xff))
+  done = usb_timeout(h.after(status), start, status.eq(0xff), "USB async timeout").end(loop, status.eq(0xff))
+  xfer = xfer.after(done)
+  checked = hcq_check(cfield(xfer, libusb.struct_libusb_transfer, "status").load(), 0, "USB async status")
+  return hcq_check(cfield(xfer.after(checked), libusb.struct_libusb_transfer, "actual_length").load(),
+                   cfield(xfer, libusb.struct_libusb_transfer, "length").load(), "USB async length")
 
 def usb_drained(h:UOp, need:UOp) -> UOp: # wait for fence == need - 1 or need, mod 256
-  loop, slot = UOp.range(UOp(Ops.NOOP), next(UOp.unique_num), dtype=dtypes.void, src=(h,)), usb_stack(dtypes.uint32)
+  start = usb_millis(h)
+  loop, slot = UOp.range(UOp(Ops.NOOP), next(UOp.unique_num), dtype=dtypes.void, src=(h, start)), usb_stack(dtypes.uint32)
   fence = slot.after(usb_ctrl(h.after(loop), 0xC0, 0xE4, rt_addr(usb_fence(h.device)), 0, slot.index(0), 1)).index(0).load() # one byte avoids tearing
-  return fence.end(loop, ((need - fence.cast(dtypes.uint64)) & 0xff) > 1)
+  pending = ((need - fence.cast(dtypes.uint64)) & 0xff) > 1
+  return usb_timeout(h.after(fence), start, pending, "USB completion timeout").end(loop, pending)
 
 def usb_chunk(h:UOp, table:UOp, i:UOp, half:int, run:int) -> UOp: # send chunk i, numbered run + i
   addr, size = table.index(2 * i).load(), table.index(2 * i + 1).load().cast(dtypes.int)
@@ -386,7 +408,7 @@ def usb_chunk(h:UOp, table:UOp, i:UOp, half:int, run:int) -> UOp: # send chunk i
   field = functools.partial(cfield, xfer:=xfer.after(h), libusb.struct_libusb_transfer)
   xfer = xfer.after(field("status").store(0xff), field("length").store(wire.cast(dtypes.uint)),
                     field("buffer").store(rt_addr(stage) + (end - wire).cast(dtypes.uint64)))
-  return ccall(libusb.libusb_submit_transfer, xfer.index(0))
+  return hcq_check(ccall(libusb.libusb_submit_transfer, xfer.index(0)), 0, "USB async submit")
 
 def usb_copyin(h:UOp, chunks:list, run:int) -> UOp: # pipeline writes through two halves
   table, n = usb_table(chunks, h.device), len(chunks)
@@ -398,6 +420,7 @@ def usb_copyin(h:UOp, chunks:list, run:int) -> UOp: # pipeline writes through tw
     hj = h.after(j, usb_chunk(h.after(j), table, j * 2, 0, run))
     h = h.after(usb_chunk(hj, table, j * 2 + 1, 1, run).end(j))
   for i in range(pairs * 2, n): h = h.after(usb_chunk(h, table, UOp.const(i, dtypes.int), i & 1, run))
+  for half in range(min(n, 2)): h = h.after(usb_reap(h, usb_xfer(h.device, half)))
   return h
 
 def usb_copyout(h:UOp, chunks:list, run:int) -> UOp: # read back through both halves

@@ -64,6 +64,14 @@ class PythonProgram(Program['PythonDevice']):
         src_values = [values[v] for v in u.src if v.dtype is not dtypes.void]
         src_dtypes = [v.dtype for v in u.src if v.dtype is not dtypes.void]
         if getenv("TRACE"): print(i, u.op, u.dtype, u.arg, src_values, src_dtypes)
+        if u.op is Ops.INS and u.arg == ("check", dtypes.void):
+          for value, expected, (m, o), gate in zip(*src_values, exec_masks[-1]):
+            if gate and value != expected:
+              _store(m, o, value, dtypes.int64)
+              _store(m, o+_step(m, dtypes.int64), expected, dtypes.int64)
+              return
+          i += 1
+          continue
         if u.op is Ops.END:
           if len(u.src) == 3:
             # conditional backedge on a loop: jump back while the condition is true

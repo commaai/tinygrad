@@ -19,6 +19,8 @@ base_rewrite = PatternMatcher([
   (UPat(Ops.END, src=(UPat(), UPat(Ops.RANGE), UPat(name="c", dtype=dtypes.bool))), lambda ctx,c: f"  if (!({ctx[c]})) {{ break; }}\n}}"),
   (UPat(Ops.IF, name="x"), lambda ctx,x: f"if ({ctx[x.src[0]]}) {{"),
   (UPat((Ops.ENDIF, Ops.END)), lambda ctx: "}"),
+  (UPat(Ops.INS, arg=("check", dtypes.void), src=(UPat(name="value"), UPat(name="expected"), UPat(name="error"))), lambda ctx,value,expected,error:
+   f"if ({ctx[value]} != {ctx[expected]}) {{ {ctx[error]}[0] = {ctx[value]}; {ctx[error]}[1] = {ctx[expected]}; return; }}"),
 
   # const
   (UPat.cvar("c").cast(dtypes.floats, name="x"), lambda ctx,x,c: None if math.isfinite(v:=c.val) else \
