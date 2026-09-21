@@ -478,7 +478,8 @@ class Compiled:
       elif self.sleep_timeout_ms is not None and elapsed > self.sleep_timeout_ms / 1000: self.on_sleep()
 
   def synchronize(self, timeout:int|None=None):
-    if self.hcq_error is not None: raise self.hcq_error
+    for dev in (self, *self.pending):
+      if dev.hcq_error is not None: raise dev.hcq_error
     try:
       self._wait_signal(tl:=self.timeline.host.view(fmt='Q'), tl[1], timeout)
       for d, v in self.pending.items(): d._wait_signal(d.timeline.host.view(fmt='Q'), v, timeout)
