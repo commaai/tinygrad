@@ -104,7 +104,7 @@ def get_kernel_actions(s:Scheduler, include_0=True, max_up:int|None=None) -> dic
 BEAM_DEBUG = getenv("BEAM_DEBUG")
 def beam_search(s:Scheduler, rawbufs:list[Buffer], var_vals:dict[str,int], amt:int, allow_test_size=True):
   key = {"ast": s.ast.key, "amt": amt, "allow_test_size": allow_test_size, "device": s.ren.target.device, "suffix": s.ren.suffix}
-  if not IGNORE_BEAM_CACHE and CACHELEVEL >= 1 and (val:=diskcache_get("beam_search", key)) is not None:
+  if not IGNORE_BEAM_CACHE and CACHELEVEL >= 1 and (val:=diskcache_get("beam_search_v2", key)) is not None:
     ret = s.copy()
     for o in val[len(s.applied_opts):]: ret.apply_opt(o)
     return ret
@@ -167,6 +167,13 @@ def beam_search(s:Scheduler, rawbufs:list[Buffer], var_vals:dict[str,int], amt:i
     terminate_worker_pool()
     raise e
 
-  if CACHELEVEL >= 1: diskcache_put("beam_search", key, beam[0][0].applied_opts)
+  if not s.applied_opts:
+    from tinygrad.codegen.opt.heuristic import hand_coded_optimizations
+    heuristic = hand_coded_optimizations(s.copy())
+    if (compiled:=_try_compile((0, heuristic))[1]) is not None:
+      tm = min(_time_program(compiled[0], var_vals, rawbufs, allow_test_size=allow_test_size,
+                             clear_l2=hasattr(dev, 'invalidate_caches'), dev_timeout=getenv("BEAM_DEV_TIMEOUT", 1)))
+      if tm < beam[0][1]: beam = [(heuristic, tm)]
+  if CACHELEVEL >= 1: diskcache_put("beam_search_v2", key, beam[0][0].applied_opts)
   if BEAM_DEBUG: print(f"BEAM_SEARCH: final tm={time_to_str(beam[0][1], w=0)}, applied_opts={beam[0][0].applied_opts}")
   return beam[0][0]
