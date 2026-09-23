@@ -322,5 +322,5 @@ def time_call(call:UOp, var_vals:dict[str, int]|None=None, timeout:int|None=None
         with Context(DEBUG=0, BEAM=0, CAPTURING=0, TRACK_MATCH_STATS=0): Tensor.ones(1024, 1024).contiguous().realize(do_update_stats=False)
     times = pm_exec.rewrite(linear.src[0].without_after, ctx) or []
     # HCQ returns the host submitter time before the device kernel times.
-    if isinstance(linear.src[0].arg.aux, HCQInfo): times = times[1:]
+    if isinstance(linear.src[0].without_after.arg.aux, HCQInfo): times = times[1:]
     yield max(times or [0.0])
