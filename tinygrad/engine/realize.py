@@ -204,6 +204,7 @@ def exec_hcq(ctx:ExecContext, call:UOp, ast:UOp) -> list[float|None]:
   ctx = replace(ctx, wait=ctx.wait and not info.skip_wait,
                 var_vals={**ctx.var_vals, **{k: v for d in info.device for k, v in cast(Any, Device[d]).var_vals.items()}})
   ets = exec_kernel(ctx, call, ast, devices=(Device[info.device[0]].host,))
+  for d in info.device: Device[d].check_failed()
   for host, dev in info.host_deps: Device[host].pending[Device[dev]] = Device[dev].timeline.host.view(fmt='Q')[1]
   if not (ctx.wait or PROFILE): return ets
 

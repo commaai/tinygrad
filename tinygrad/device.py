@@ -479,7 +479,9 @@ class Compiled:
   def synchronize(self, timeout:int|None=None):
     try:
       self._wait_signal(tl:=self.timeline.host.view(fmt='Q'), tl[1], timeout)
-      for d, v in self.pending.items(): d._wait_signal(d.timeline.host.view(fmt='Q'), v, timeout)
+      for d, v in list(self.pending.items()):
+        try: d._wait_signal(d.timeline.host.view(fmt='Q'), v, timeout)
+        except RuntimeError: del self.pending[d]
     except RuntimeError:
       self.on_device_hang()
       raise
@@ -492,6 +494,7 @@ class Compiled:
     return self.iface.count if hasattr(self, 'iface') else 1
 
   def on_device_hang(self): raise RuntimeError(f"{self.device} hang detected")
+  def check_failed(self): pass
 
   def on_sleep(self):
     if (iface:=getattr(self, "iface", None)) is not None and hasattr(iface, "sleep"): iface.sleep(self.sleep_timeout_ms)

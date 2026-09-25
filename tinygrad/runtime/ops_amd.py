@@ -19,7 +19,7 @@ from tinygrad.runtime.support.hcq import FileIOInterface, MMIOInterface, hcq_fil
 from tinygrad.runtime.support.am.amdev import AMDev, AMMemoryManager
 from tinygrad.runtime.support.amd import AMDReg, AMDIP, import_module, import_soc, import_pmc
 from tinygrad.runtime.support.system import PCIIfaceBase, USBPCIDevice, MAP_FIXED, MAP_NORESERVE
-from tinygrad.runtime.support.usb import USB3, pm_usb_batch, pm_usb_lower, pm_usb_bufferize
+from tinygrad.runtime.support.usb import USB3, pm_usb_batch, pm_usb_lower, pm_usb_bufferize, usb_error
 from tinygrad.runtime.support.memory import AddrSpace
 if getenv("IOCTL"): import extra.hip_gpu_driver.hip_ioctl  # noqa: F401 # pylint: disable=unused-import
 
@@ -1068,5 +1068,7 @@ class AMDDevice(Compiled):
     super().collect_prof()
 
   def on_device_hang(self): self.iface.on_device_hang()
+  def check_failed(self):
+    if isinstance(self.iface, USBIface) and (err:=usb_error(self)): raise RuntimeError(f"{self.device} usb transfer failed: {err}")
 
 if not HCQ2: from extra.hcq1.ops_amd_old import * # noqa: F401, F403 # pylint: disable=unused-import
